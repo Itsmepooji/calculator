@@ -1,0 +1,298 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: The template used to create an ECS Cluster for UI deployment.
+Parameters:
+  Organization:
+    Description: Name of the Organization
+    Type: String
+    Default: esv
+  Application:
+    Description: Name of the Application
+    Type: String
+    Default: epic
+  Environment:
+    Description: Name of the Environment
+    Type: String
+    Default: dev
+  VpcId:
+    Type: String
+    Description: ID of the VPC
+    AllowedPattern: "^(?:vpc-[0-9a-f]{8,17}|)$"
+    ConstraintDescription: VPC Id must begin with 'vpc-' and have a valid build
+  PublicSubnetId1:
+    Type: String
+    Description: Public Subnet Id1 where Load Balancer will run
+  PublicSubnetId2:
+    Type: String
+    Description: Public Subnet Id2 where Load Balancer will run
+  PrivateSubnetId1:
+    Type: String
+    Description: Private Subnet Id1 where ECS Instance will run
+  PrivateSubnetId2:
+    Type: String
+    Description: Private Subnet Id1 where ECS Instance will run
+  ContainerPort:
+    Type: Number
+    Default: 80
+  ImageURI:
+    Type: String
+Resources:
+  #Creats ECS Cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    DependsOn: ExecutionRole
+     # checkov:skip=CKV_AWS_65:Ensure container insights are enabled on ECS cluster"
+    Properties:
+      ClusterName: !Sub '${Organization}-${AWS::Region}-${Environment}-${Application}-ui-ecs-cluster'
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      ClusterSettings:
+        - Name: containerInsights
+          Value: disabled
+      Configuration:
+        ExecuteCommandConfiguration:
+          Logging: DEFAULT
+      Tags:
+        - Key: Name
+          Value: !Sub '${Organization}-${AWS::Region}-${Environment}-${Application}-ui-ecs-cluster'
+        - Key: project
+          Value: epic
+        - Key: owner
+          Value: jim.caruso@elevatesportsventures.com
+        - Key: creation-type
+          Value: cloudformation
+        - Key: department
+          Value: engineering
+
+  # Create a TaskDefinition with container details
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${Organization}-${AWS::Region}-${Environment}-${Application}-ui-ecs-task-definition'
+      Memory: 1024
+      Cpu: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - 'FARGATE'
+      # A role needed by ECS.
+      # "The ARN of the task execution role that containers in this task can assume. All containers in this task are granted the permissions that are specified in this role."
+      # "There is an optional task execution IAM role that you can specify with Fargate to allow your Fargate tasks to make API calls to Amazon ECR."
+      TaskRoleArn: !GetAtt ExecutionRole.Arn
+      # "The Amazon Resource Name (ARN) of an AWS Identity and Access Management (IAM) role that grants containers in the task permission to call AWS APIs on your behalf."
+      # A role for the containers
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: !Sub '${Organization}-${AWS::Region}-${Environment}-${Application}-ui-ecs-cluster'
+          Image: !Ref ImageURI
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+          # Send logs to CloudWatch Logs
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroup
+              awslogs-stream-prefix: ecs
+              awslogs-create-group: true
+      Tags:
+        - Key: project
+          Value: epic
+        - Key: owner
+          Value: jim.caruso@elevatesportsventures.com
+        - Key: creation-type
+          Value: cloudformation
+        - Key: department
+          Value: engineering
+
+  #ECS Task Definition Log Group
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    # checkov:skip=CKV_AWS_158:Ensure that CloudWatch Log Group is encrypted by KMS"
+    Properties:
+      LogGroupName: !Join [ '', [ /ecs/, TaskDefinition, lg ] ]
+      RetentionInDays: 30
+      Tags:
+        - Key: project
+          Value: epic
+        - Key: owner
+          Value: jim.caruso@elevatesportsventures.com
+        - Key: creation-type
+          Value: cloudformation
+        - Key: department
+          Value: engineering
+
+  # A role needed by ECS Service
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Organization}-${Environment}-${Application}-ui-ecs-execution-role'
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+      Tags:
+        - Key: project
+          Value: epic
+        - Key: owner
+          Value: jim.caruso@elevatesportsventures.com
+        - Key: creation-type
+          Value: cloudformation
+        - Key: department
+          Value: engineering
+
+  # Create a security group for load balancer and open port 80 in bound from internet
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: "CKV_AWS_260"
+            comment: "Ensure no security groups allow ingress from 0.0.0.0:0 to port 80"
+    Properties:
+      GroupDescription: !Sub '${Organization}-${AWS::Region}-${Environment}-${Application}-alb-sg'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Allows ingress from port 80
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allows Egress
+      Tags:
+        - Key: project
+          Value: epic
+        - Key: owner
+          Value: jim.caruso@elevatesportsventures.com
+        - Key: creation-type
+          Value: cloudformation
+        - Key: department
+          Value: engineering
+  # Create a security group for Containers and open inbound Container port from Load balancer security group to the Container
+  ContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub '${Organization}-${AWS::Region}-${Environment}-${Application}-ui-container-sg'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+          Description: Allows ingress from ALB
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allows Egress
+      Tags:
+        - Key: project
+          Value: epic
+        - Key: owner
+          Value: jim.caruso@elevatesportsventures.com
+        - Key: creation-type
+          Value: cloudformation
+        - Key: department
+          Value: engineering
+
+  # Create a LoadBalancer and attach the Security group and Subnets
+  LoadBalancer:
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3008
+            - E2503
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    # checkov:skip=CKV_AWS_91:Ensure the ELBv2 (Application/Network) has access logging enabled"
+    # checkov:skip=CKV_AWS_131:Ensure that ALB drops HTTP headers"
+    Properties:
+      IpAddressType: ipv4
+      Name: !Sub '${Organization}-${Environment}-${Application}-ui-alb'
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Subnets:
+        - !Ref PublicSubnetId1
+        - !Ref PublicSubnetId2
+      Type: application
+      Tags:
+        - Key: project
+          Value: epic
+        - Key: owner
+          Value: jim.caruso@elevatesportsventures.com
+        - Key: creation-type
+          Value: cloudformation
+        - Key: department
+          Value: engineering
+
+  # Create a TargetGroup for HTTP port 80
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${Organization}-${AWS::Region}-${Environment}-${Application}-ui-tg'
+      Port: 80
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VpcId
+
+  # Create a LoadBalancerListener and attach the TargetGroup and LoadBalancer
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    # checkov:skip=CKV_AWS_103:Ensure that Load Balancer Listener is using at least TLS v1.2"
+    # checkov:skip=CKV_AWS_2:Ensure ALB protocol is HTTPS"
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # Create an ECS Service and add created Cluster, TaskDefintion, Subnets, TargetGroup and SecurityGroup
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: LoadBalancerListener
+    Properties:
+      ServiceName: !Sub '${Organization}-${AWS::Region}-${Environment}-${Application}-ui-service'
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !Ref PrivateSubnetId1
+            - !Ref PrivateSubnetId2
+          SecurityGroups:
+            - !Ref ContainerSecurityGroup
+      LoadBalancers:
+        - ContainerName: !Sub '${Organization}-${AWS::Region}-${Environment}-${Application}-ui-ecs-cluster'
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
+      Tags:
+        - Key: project
+          Value: epic
+        - Key: owner
+          Value: jim.caruso@elevatesportsventures.com
+        - Key: creation-type
+          Value: cloudformation
+        - Key: department
+          Value: engineering
+
+
+Outputs:
+  ECSCluster:
+    Description: The created cluster.
+    Value:
+      Ref: ECSCluster
